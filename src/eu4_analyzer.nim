@@ -1,4 +1,4 @@
-import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sets, streams]
+import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sets, streams, terminal]
 import yaml
 
 const CACHE_FILE = "vanilla_keys.json" # JSON is faster for large flat sets
@@ -64,7 +64,8 @@ proc collectDefinitions(file: string) =
         definedKeys.incl(key)
 
 # --- Pass 2: References ---
-proc checkReferences(file: string) =
+proc checkReferences(file, root: string) =
+  let displayPath = relativePath(file, root)
   var lineNum = 0
   for line in lines(file):
     lineNum.inc()
@@ -82,9 +83,14 @@ proc checkReferences(file: string) =
       if key.match(tagPattern).isSome or key.match(keyPattern).isNone:
         continue
       if key notin definedKeys:
-          echo "Missing Definition: ", key, " in ", file, " at line ", lineNum
+          # echo "Missing Definition: ", key, " in ", displayPath, " at line ", lineNum
+        stdout.styledWriteLine(
+          fgWhite, "Missing definition: ", fgCyan, styleBright, key,
+          resetStyle, fgWhite, " in ", displayPath, " at line ", $lineNum
+        )
 
-proc checkBraceScopes(filePath: string) =
+proc checkBraceScopes(filePath, root: string) =
+  let displayPath = relativePath(filePath, root)
   var
     balance = 0
     lineNum = 0
@@ -112,14 +118,22 @@ proc checkBraceScopes(filePath: string) =
 
           # Optimization: Catch immediate over-closing
           if balance < 0:
-            echo "Error: Extra '}' found at ", filePath, ":", lineNum
+            # echo "Error: Extra '}' found at ", displayPath, ":", lineNum
+            stdout.styledWriteLine(
+              fgWhite, "Error: ", fgRed, styleBright, "Extra '}' ",
+              resetStyle, fgWhite, " found at ", displayPath, " at line ", $lineNum
+            )
             return # Stop early for this file, it's already broken
 
           # If we get here, know we won't error by popping from empty
           discard scopeStart.pop()
 
   if balance > 0:
-    echo "Error: Missing ", balance, " closing brace(s) '}' in ", filePath, "\nLast scope started at:", scopeStart[0]
+    # echo "Error: Missing ", balance, " closing brace(s) '}' in ", displayPath, "\nLast scope started at:", scopeStart[0]
+    stdout.styledWriteLine(
+      fgWhite, "Error: ", fgRed, styleBright, "Missing ", $balance, " closing brace(s) '}' ",
+      resetStyle, fgWhite, " in ", displayPath, "\nLast scope started at line ", $scopeStart[0]
+    )
   elif balance == 0:
     # echo filePath, " is scope-safe."
     discard
@@ -183,10 +197,10 @@ for dir in config.definitions:
     if file.endsWith(".txt"):
       if file.endsWith(".txt"):
         if onlyBraces:
-          checkBraceScopes(file)
+          checkBraceScopes(file, config.mod_root)
         else: # Run everything
           collectDefinitions(file)
-          checkBraceScopes(file)
+          checkBraceScopes(file, config.mod_root)
 
 # Second parser pass
 if not onlyBraces:
@@ -198,6 +212,6 @@ if not onlyBraces:
     echo "Scanning directory: ", path
     for file in walkDirRec(path):
       if file.endsWith(".txt"):
-        checkReferences(file)
+        checkReferences(file, config.mod_root)
 
 echo "Done!"
