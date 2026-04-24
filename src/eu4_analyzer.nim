@@ -1,7 +1,8 @@
-import nre, os, strutils, sets, streams, yaml
+import std/[nre, os, parseopt, strutils, sets, streams]
+import yaml
 
-var definedKeys = initHashSet[string]()
-var referencedKeys = initHashSet[string]()
+var definedKeys = HashSet[string]()
+var referencedKeys = HashSet[string]()
 
 let keyPattern = re"[a-zA-Z]\w*" # Must start with letter then contain letters, numbers, underscores
 let tagPattern = re"[A-Z]{3}" # Match 3 uppercase letters
@@ -125,10 +126,25 @@ proc processFiles(dirPath: string) =
 
 # Entry point logic
 var configFile = "config.yaml"
-if paramCount() > 1:
-  configFile = paramStr(1)
+var onlyBraces = false
+
+
+# Parse arguments
+var p = initOptParser()
+for kind, key, val in p.getopt():
+  case kind
+  of cmdLongOption, cmdShortOption:
+    case key
+    of "braces", "b":
+      onlyBraces = true
+    # Add future flags here
+  of cmdArgument:
+    configFile = key # The first non-flag argument is our config path
+  of cmdEnd: assert(false) # Should not happen
 
 let config = loadConfig(configFile)
+
+# First pass through files
 for dir in config.definitions:
   let path = joinPath(config.mod_root, dir)
   if not validPath(path):
@@ -137,17 +153,23 @@ for dir in config.definitions:
   echo "Scanning directory: ", path
   for file in walkDirRec(path):
     if file.endsWith(".txt"):
-      collectDefinitions(file)
-      checkBraceScopes(file)
+      if file.endsWith(".txt"):
+        if onlyBraces:
+          checkBraceScopes(file)
+        else: # Run everything
+          collectDefinitions(file)
+          checkBraceScopes(file)
 
-for dir in config.references:
-  let path = joinPath(config.mod_root, dir)
-  if not validPath(path):
-    continue
+# Second parser pass
+if not onlyBraces:
+  for dir in config.references:
+    let path = joinPath(config.mod_root, dir)
+    if not validPath(path):
+      continue
 
-  echo "Scanning directory: ", path
-  for file in walkDirRec(path):
-    if file.endsWith(".txt"):
-      checkReferences(file)
+    echo "Scanning directory: ", path
+    for file in walkDirRec(path):
+      if file.endsWith(".txt"):
+        checkReferences(file)
 
 echo "Done!"
