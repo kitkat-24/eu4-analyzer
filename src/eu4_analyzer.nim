@@ -59,7 +59,7 @@ proc collectDefinitions(file: string) =
     let cleanLine = line.split('#')[0].strip()
     if "=" in cleanLine:
       # Basic logic: everything before '=' is a key definition
-      let key = cleanLine.split('=')[0].strip()
+      let key = cleanLine.split('=')[0].strip().toLower()
       if key.match(keyPattern).isSome:
         definedKeys.incl(key)
 
@@ -79,7 +79,7 @@ proc checkReferences(file, root: string) =
       if words.len < 2 or operator.match(modifierTrigger).isNone:
         continue
 
-      let key = words[1].strip()
+      let key = words[1].strip().toLower()
       if key.match(tagPattern).isSome or key.match(keyPattern).isNone:
         continue
       if key notin definedKeys:
