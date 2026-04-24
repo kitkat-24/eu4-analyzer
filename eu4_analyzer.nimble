@@ -11,3 +11,5 @@ bin           = @["eu4_analyzer"]
 # Dependencies
 
 requires "nim >= 2.2.4"
+
+requires "yaml >= 2.2.1"
