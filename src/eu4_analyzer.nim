@@ -1,4 +1,4 @@
-import std/[json, jsonutils, nre, os, parseopt, strutils, sequtils, sets, streams]
+import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sets, streams]
 import yaml
 
 const CACHE_FILE = "vanilla_keys.json" # JSON is faster for large flat sets
@@ -28,7 +28,9 @@ proc loadConfig(path: string): Config =
 # --- Logic for caching vanilla game keys ---
 proc saveCache(keySet: HashSet[string]) =
   # 1. Convert the HashSet->Seq to a JsonNode using the % operator
-  let jsonNode = %(keySet.toSeq())
+  var list = keySet.toSeq()
+  list.sort() # Sort for nicer reading
+  let jsonNode = %list
 
   # 2. Write the stringified JSON to the file
   let f = open(CACHE_FILE, fmWrite)
