@@ -1,6 +1,7 @@
-import std/[nre, os, parseopt, strutils, sets, streams]
+import std/[json, jsonutils, nre, os, parseopt, strutils, sequtils, sets, streams]
 import yaml
 
+const CACHE_FILE = "vanilla_keys.json" # JSON is faster for large flat sets
 var definedKeys = HashSet[string]()
 var referencedKeys = HashSet[string]()
 
@@ -11,6 +12,7 @@ let modifierTrigger = re"^has\w+modifier$" # Find various has_X_modifer triggers
 # YAML parser type
 type
   Config = object
+    vanilla_root: string
     mod_root: string
     definitions: seq[string]
     references: seq[string]
@@ -22,6 +24,32 @@ proc loadConfig(path: string): Config =
 
   load(s, result)
   s.close()
+
+# --- Logic for caching vanilla game keys ---
+proc saveCache(keySet: HashSet[string]) =
+  # 1. Convert the HashSet->Seq to a JsonNode using the % operator
+  let jsonNode = %(keySet.toSeq())
+
+  # 2. Write the stringified JSON to the file
+  let f = open(CACHE_FILE, fmWrite)
+  f.write(pretty(jsonNode)) # The $ operator turns the JsonNode into a string
+  f.close()
+  echo "Vanilla cache saved to ", CACHE_FILE
+
+proc loadCache() =
+  if fileExists(CACHE_FILE):
+    var s = newFileStream(CACHE_FILE, fmRead)
+    if s != nil:
+      let data = parseJson(s)
+      let keyList = to(data, seq[string])
+      definedKeys = keyList.toHashSet()
+      s.close()
+      echo "Loaded ", definedKeys.len, " keys from vanilla cache."
+    else:
+      echo "Failed to open vanilla cache file!"
+  else:
+    echo "No vanilla cache found. Proceeding with mod-only keys."
+    echo "Run with the -v flag to build the vanilla cache"
 
 # --- Pass 1: Definitions ---
 proc collectDefinitions(file: string) =
@@ -101,32 +129,10 @@ proc validPath(dirPath: string): bool =
     result = false
 
 
-
-proc processFiles(dirPath: string) =
-  # Check if the directory actually exists first
-  if not dirExists(dirPath):
-    echo "Error: Directory '" & dirPath & "' does not exist."
-    quit(1)
-
-
-  # walkDirRec yields files one by one
-  for file in walkDirRec(dirPath):
-    # Filter for .txt files
-    if file.endsWith(".txt"):
-      try:
-        echo "Processing: ", file
-
-        # This is where your processing logic goes
-        let content = readFile(file)
-        # Example: echo "File size: ", content.len
-        echo "File found: ", file
-
-      except IOError:
-        echo "Could not read file: ", file
-
 # Entry point logic
 var configFile = "config.yaml"
 var onlyBraces = false
+var vanillaMode = false
 
 
 # Parse arguments
@@ -135,14 +141,34 @@ for kind, key, val in p.getopt():
   case kind
   of cmdLongOption, cmdShortOption:
     case key
-    of "braces", "b":
-      onlyBraces = true
+    of "braces", "b": onlyBraces = true
+    of "vanilla", "v": vanillaMode = true
     # Add future flags here
   of cmdArgument:
     configFile = key # The first non-flag argument is our config path
   of cmdEnd: assert(false) # Should not happen
 
+
 let config = loadConfig(configFile)
+
+# 1. Load vanilla cache if we aren't rebuilding it
+if not vanillaMode:
+  loadCache()
+# 2. Else process vanilla cache
+else:
+  for dir in config.definitions:
+    let path = joinPath(config.vanilla_root, dir)
+    if not validPath(path):
+      continue
+
+    echo "Scanning directory: ", path
+    for file in walkDirRec(path):
+      if file.endsWith(".txt"):
+        collectDefinitions(file)
+
+  saveCache(definedKeys)
+  echo "Vanilla processing complete."
+  quit(0)
 
 # First pass through files
 for dir in config.definitions:
