@@ -99,10 +99,8 @@ proc checkBraceScopes(filePath, root: string) =
 
   for line in lines(filePath):
     inc lineNum
-    # 1. Strip comments immediately
-    let activeCode = line.split('#')[0]
 
-    for i, c in activeCode:
+    for i, c in line:
       # 2. Handle quoted strings
       if c == '"':
         inString = not inString
@@ -110,7 +108,9 @@ proc checkBraceScopes(filePath, root: string) =
 
       if not inString:
         # 3. The actual counting
-        if c == '{':
+        if c == '#': # comment start, not character in string
+          break
+        elif c == '{':
           inc balance
           scopeStart.add(lineNum)
         elif c == '}':
@@ -168,7 +168,7 @@ for kind, key, val in p.getopt():
 let config = loadConfig(configFile)
 
 # 1. Load vanilla cache if we aren't rebuilding it
-if not vanillaMode:
+if not vanillaMode and fileExists(CACHE_FILE):
   loadCache()
 # 2. Else process vanilla cache
 else:
@@ -183,8 +183,8 @@ else:
         collectDefinitions(file)
 
   saveCache(definedKeys)
-  echo "Vanilla processing complete."
-  quit(0)
+  echo "Vanilla processing complete. Cache saved."
+
 
 # First pass through files
 for dir in config.definitions:
@@ -196,22 +196,21 @@ for dir in config.definitions:
   for file in walkDirRec(path):
     if file.endsWith(".txt"):
       if file.endsWith(".txt"):
-        if onlyBraces:
-          checkBraceScopes(file, config.mod_root)
-        else: # Run everything
+        checkBraceScopes(file, config.mod_root)
+        if not onlyBraces:
           collectDefinitions(file)
-          checkBraceScopes(file, config.mod_root)
 
 # Second parser pass
-if not onlyBraces:
-  for dir in config.references:
-    let path = joinPath(config.mod_root, dir)
-    if not validPath(path):
-      continue
+for dir in config.references:
+  let path = joinPath(config.mod_root, dir)
+  if not validPath(path):
+    continue
 
-    echo "Scanning directory: ", path
-    for file in walkDirRec(path):
-      if file.endsWith(".txt"):
+  echo "Scanning directory: ", path
+  for file in walkDirRec(path):
+    if file.endsWith(".txt"):
+      checkBraceScopes(file, config.mod_root)
+      if not onlyBraces:
         checkReferences(file, config.mod_root)
 
 echo "Done!"
