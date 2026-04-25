@@ -1,21 +1,28 @@
-import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sets, streams, terminal]
+import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sugar, sets, streams, terminal]
 import yaml
 
-const CACHE_FILE = "vanilla_keys.json" # JSON is faster for large flat sets
-var definedKeys = HashSet[string]()
-var referencedKeys = HashSet[string]()
+const VANILLA_MODIFIER_CACHE = "vanilla_modifiers.json" # JSON is faster for large flat sets
+const VANILLA_FLAG_CACHE = "vanilla_flags.json"
 
-let keyPattern = re"[a-zA-Z]\w*" # Must start with letter then contain letters, numbers, underscores
+var definedModifiers = HashSet[string]()
+var referencedModifiers = HashSet[string]()
+var definedFlags = HashSet[string]()
+var referencedFlags = HashSet[string]()
+
+let modifierPattern = re"[a-zA-Z]\w*" # Must start with letter then contain letters, numbers, underscores
 let tagPattern = re"[A-Z]{3}" # Match 3 uppercase letters
 let modifierTrigger = re"^has\w+modifier$" # Find various has_X_modifer triggers
+let flagTrigger = re"^ha[sd]\w+flag$" # Find various has_X_flag triggers
+let flagEffect = re"^set\w+flag$" # Find various has_X_flag triggers
 
 # YAML parser type
 type
   Config = object
     vanilla_root: string
     mod_root: string
-    definitions: seq[string]
-    references: seq[string]
+    directories: seq[string]
+    # definitions: seq[string]
+    # references: seq[string]
 
 proc loadConfig(path: string): Config =
   var s = newFileStream(path, fmRead)
@@ -26,27 +33,27 @@ proc loadConfig(path: string): Config =
   s.close()
 
 # --- Logic for caching vanilla game keys ---
-proc saveCache(keySet: HashSet[string]) =
+proc saveCache(keySet: HashSet[string], filename: string) =
   # 1. Convert the HashSet->Seq to a JsonNode using the % operator
   var list = keySet.toSeq()
   list.sort() # Sort for nicer reading
   let jsonNode = %list
 
   # 2. Write the stringified JSON to the file
-  let f = open(CACHE_FILE, fmWrite)
+  let f = open(filename, fmWrite)
   f.write(pretty(jsonNode)) # The $ operator turns the JsonNode into a string
   f.close()
-  echo "Vanilla cache saved to ", CACHE_FILE
+  echo "Vanilla cache saved to ", filename
 
-proc loadCache() =
-  if fileExists(CACHE_FILE):
-    var s = newFileStream(CACHE_FILE, fmRead)
+proc loadCache(filename: string): HashSet[string] =
+  if fileExists(filename):
+    var s = newFileStream(filename, fmRead)
     if s != nil:
       let data = parseJson(s)
       let keyList = to(data, seq[string])
-      definedKeys = keyList.toHashSet()
+      result = keyList.toHashSet()
       s.close()
-      echo "Loaded ", definedKeys.len, " keys from vanilla cache."
+      echo "Loaded ", result.len, " keys from vanilla cache."
     else:
       echo "Failed to open vanilla cache file!"
   else:
@@ -56,12 +63,17 @@ proc loadCache() =
 # --- Pass 1: Definitions ---
 proc collectDefinitions(file: string) =
   for line in lines(file):
+    # TODO: Smarter comment parsing like in checkBraceScopes()?
     let cleanLine = line.split('#')[0].strip()
+    # Basic logic: lines with an '=' contain a definition or reference
     if "=" in cleanLine:
-      # Basic logic: everything before '=' is a key definition
-      let key = cleanLine.split('=')[0].strip().toLower()
-      if key.match(keyPattern).isSome:
-        definedKeys.incl(key)
+      let tokens = cleanLine.split('=').map(s => s.strip()).map(s => s.toLower())
+      let key = tokens[0]
+
+      if key.match(flagEffect).isSome: # Flag is set like set_country_flag = HUN_my_cool_flag
+        definedFlags.incl(tokens[1])
+      elif key.match(modifierPattern).isSome: # Modifier definition is it's name, e.g. HUN_fort_defense = { ... }
+        definedModifiers.incl(key)
 
 # --- Pass 2: References ---
 proc checkReferences(file, root: string) =
@@ -73,21 +85,41 @@ proc checkReferences(file, root: string) =
     # Logic to find references (this depends on your specific script syntax)
     # If the key appears on the right side of an '=', it's a reference
     if "=" in cleanLine:
-      let words = cleanLine.split('=')
-      let operator = words[0].strip()
-
-      if words.len < 2 or operator.match(modifierTrigger).isNone:
-        continue
-
-      let key = words[1].strip().toLower()
-      if key.match(tagPattern).isSome or key.match(keyPattern).isNone:
-        continue
-      if key notin definedKeys:
-          # echo "Missing Definition: ", key, " in ", displayPath, " at line ", lineNum
+      let tokens = cleanLine.split('=').map(s => s.strip()).map(s => s.toLower())
+      # Check against line that has an = with no word tokens around it (seems rare but...)
+      if tokens.len == 0:
         stdout.styledWriteLine(
-          fgWhite, "Missing definition: ", fgCyan, styleBright, key,
-          resetStyle, fgWhite, " in ", displayPath, " at line ", $lineNum
+          fgYellow, "Warning: ", resetStyle, fgWhite, "Dangling = in ",
+          displayPath, " at line ", $lineNum
         )
+        continue
+
+      # TODO: Warning flag (default on or off?)
+      # Catch multiline expression without opening brace
+      if tokens.len < 2:
+        stdout.styledWriteLine(
+          fgYellow, "Warning: ", resetStyle, fgWhite, "Bad assignment style (no open brace or keyword after =) in ",
+          displayPath, " at line ", $lineNum
+        )
+        continue
+
+      let operator = tokens[0]
+      let key = tokens[1]
+      if operator.match(modifierTrigger).isSome:
+        # TODO: Catch $variables$ and error for other malformed modifier references
+        if key.match(tagPattern).isSome or key.match(modifierPattern).isNone:
+          continue
+        if key notin definedModifiers:
+          stdout.styledWriteLine(
+            fgWhite, "Modifier missing definition: ", fgCyan, styleBright, key,
+            resetStyle, fgWhite, " in ", displayPath, " at line ", $lineNum
+          )
+      elif operator.match(flagTrigger).isSome:
+        if key notin definedFlags:
+          stdout.styledWriteLine(
+            fgWhite, "Flag missing definition: ", fgBlue, styleBright, key,
+            resetStyle, fgWhite, " in ", displayPath, " at line ", $lineNum
+          )
 
 proc checkBraceScopes(filePath, root: string) =
   let displayPath = relativePath(filePath, root)
@@ -168,31 +200,33 @@ for kind, key, val in p.getopt():
 let config = loadConfig(configFile)
 
 # 1. Load vanilla cache if we aren't rebuilding it
-if not vanillaMode and fileExists(CACHE_FILE):
-  loadCache()
+if not vanillaMode and fileExists(VANILLA_MODIFIER_CACHE) and fileExists(VANILLA_FLAG_CACHE):
+  definedModifiers = loadCache(VANILLA_MODIFIER_CACHE)
+  definedFlags = loadCache(VANILLA_FLAG_CACHE)
 # 2. Else process vanilla cache
 else:
-  for dir in config.definitions:
+  for dir in config.directories:
     let path = joinPath(config.vanilla_root, dir)
     if not validPath(path):
       continue
 
-    echo "Scanning directory: ", path
+    echo "\nScanning directory for definitions: ", path
     for file in walkDirRec(path):
       if file.endsWith(".txt"):
         collectDefinitions(file)
 
-  saveCache(definedKeys)
-  echo "Vanilla processing complete. Cache saved."
+  saveCache(definedModifiers, VANILLA_MODIFIER_CACHE)
+  saveCache(definedFlags, VANILLA_FLAG_CACHE)
+  echo "\nVanilla processing complete. Cache saved.\n-------------------------------\n"
 
 
 # First pass through files
-for dir in config.definitions:
+for dir in config.directories:
   let path = joinPath(config.mod_root, dir)
   if not validPath(path):
     continue
 
-  echo "Scanning directory: ", path
+  echo "\nScanning directory for definitions: ", path
   for file in walkDirRec(path):
     if file.endsWith(".txt"):
       if file.endsWith(".txt"):
@@ -200,17 +234,20 @@ for dir in config.definitions:
         if not onlyBraces:
           collectDefinitions(file)
 
+
+if onlyBraces:
+  echo "Braces check only; done!"
+  quit(0)
+
 # Second parser pass
-for dir in config.references:
+for dir in config.directories:
   let path = joinPath(config.mod_root, dir)
   if not validPath(path):
     continue
 
-  echo "Scanning directory: ", path
+  echo "\nScanning directory for references: ", path
   for file in walkDirRec(path):
     if file.endsWith(".txt"):
-      checkBraceScopes(file, config.mod_root)
-      if not onlyBraces:
-        checkReferences(file, config.mod_root)
+      checkReferences(file, config.mod_root)
 
-echo "Done!"
+echo "\nDone!"
