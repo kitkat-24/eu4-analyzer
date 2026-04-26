@@ -1,5 +1,6 @@
-import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sugar, sets, streams, terminal]
+import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sugar, sets, streams, tables, terminal]
 import yaml
+import tokenizer
 
 const VANILLA_MODIFIER_CACHE = "vanilla_modifiers.json" # JSON is faster for large flat sets
 const VANILLA_FLAG_CACHE = "vanilla_flags.json"
@@ -9,10 +10,10 @@ var referencedModifiers = HashSet[string]()
 var definedFlags = HashSet[string]()
 var referencedFlags = HashSet[string]()
 
-let modifierPattern = re"[a-zA-Z]\w*" # Must start with letter then contain letters, numbers, underscores
+let keyPattern = re"[a-zA-Z]\w*" # Must start with letter then contain letters, numbers, underscores
 let tagPattern = re"[A-Z]{3}" # Match 3 uppercase letters
 let modifierTrigger = re"^has\w+modifier$" # Find various has_X_modifer triggers
-let flagTrigger = re"^ha[sd]\w+flag$" # Find various has_X_flag triggers
+let flagTrigger = re"^has\w+flag$|^flag$" # Find various has_X_flag triggers
 let flagEffect = re"^set\w+flag$" # Find various has_X_flag triggers
 
 # YAML parser type
@@ -61,104 +62,85 @@ proc loadCache(filename: string): HashSet[string] =
     echo "Run with the -v flag to build the vanilla cache"
 
 # --- Pass 1: Definitions ---
-proc collectDefinitions(file: string) =
-  for line in lines(file):
-    # TODO: Smarter comment parsing like in checkBraceScopes()?
-    let cleanLine = line.split('#')[0].strip()
-    # Basic logic: lines with an '=' contain a definition or reference
-    if "=" in cleanLine:
-      let tokens = cleanLine.split('=').map(s => s.strip()).map(s => s.toLower())
-      let key = tokens[0]
+proc collectDefinitions(tokens: seq[Token]) =
+  for i in 1..tokens.len-2:
+    # Found an expression
+    if tokens[i].lex == "=":
+      let left = tokens[i-1].lex
+      let right = tokens[i+1].lex
 
-      if key.match(flagEffect).isSome: # Flag is set like set_country_flag = HUN_my_cool_flag
-        definedFlags.incl(tokens[1])
-      elif key.match(modifierPattern).isSome: # Modifier definition is it's name, e.g. HUN_fort_defense = { ... }
-        definedModifiers.incl(key)
+      # Flag is set like set_country_flag = HUN_my_cool_flag
+      if left.match(flagEffect).isSome and right.match(keyPattern).isSome:
+        definedFlags.incl(right)
+      # Modifier definition is it's name, e.g. HUN_fort_defense = { ... }
+      elif left.match(keyPattern).isSome and right == "{":
+        definedModifiers.incl(left)
 
 # --- Pass 2: References ---
-proc checkReferences(file, root: string) =
+proc checkReferences(tokens: seq[Token], file, root: string) =
   let displayPath = relativePath(file, root)
-  var lineNum = 0
-  for line in lines(file):
-    lineNum.inc()
-    let cleanLine = line.split('#')[0].strip()
-    # Logic to find references (this depends on your specific script syntax)
-    # If the key appears on the right side of an '=', it's a reference
-    if "=" in cleanLine:
-      let tokens = cleanLine.split('=').map(s => s.strip()).map(s => s.toLower())
-      # Check against line that has an = with no word tokens around it (seems rare but...)
-      if tokens.len == 0:
-        stdout.styledWriteLine(
-          fgYellow, "Warning: ", resetStyle, fgWhite, "Dangling = in ",
-          displayPath, " at line ", $lineNum
-        )
-        continue
+  for i in 1..tokens.len-2:
+    # Found an expression
+    if tokens[i].lex == "=":
+      # if tokens.len == 0:
+      #   stdout.styledWriteLine(
+      #     fgYellow, "Warning: ", resetStyle, fgWhite, "Dangling = in ",
+      #     displayPath, " at line ", $lineNum
+      #   )
+      #   continue
 
-      # TODO: Warning flag (default on or off?)
-      # Catch multiline expression without opening brace
-      if tokens.len < 2:
-        stdout.styledWriteLine(
-          fgYellow, "Warning: ", resetStyle, fgWhite, "Bad assignment style (no open brace or keyword after =) in ",
-          displayPath, " at line ", $lineNum
-        )
-        continue
+      # # Catch multiline expression without opening brace
+      # if tokens.len < 2:
+      #   stdout.styledWriteLine(
+      #     fgYellow, "Warning: ", resetStyle, fgWhite, "Bad assignment style (no open brace or keyword after =) in ",
+      #     displayPath, " at line ", $lineNum
+      #   )
+      #   continue
 
-      let operator = tokens[0]
-      let key = tokens[1]
-      if operator.match(modifierTrigger).isSome:
+      let left = tokens[i-1].lex
+      let right = tokens[i+1].lex
+
+      if left.match(modifierTrigger).isSome:
         # TODO: Catch $variables$ and error for other malformed modifier references
-        if key.match(tagPattern).isSome or key.match(modifierPattern).isNone:
+        if right.match(tagPattern).isSome or right.match(keyPattern).isNone:
           continue
-        if key notin definedModifiers:
+        if right notin definedModifiers:
           stdout.styledWriteLine(
-            fgWhite, "Modifier missing definition: ", fgCyan, styleBright, key,
-            resetStyle, fgWhite, " in ", displayPath, " at line ", $lineNum
+            fgWhite, "Modifier missing definition: ", fgCyan, styleBright, right,
+            resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
           )
-      elif operator.match(flagTrigger).isSome:
-        if key notin definedFlags:
+      elif left.match(flagTrigger).isSome:
+        if right notin definedFlags:
           stdout.styledWriteLine(
-            fgWhite, "Flag missing definition: ", fgBlue, styleBright, key,
-            resetStyle, fgWhite, " in ", displayPath, " at line ", $lineNum
+            fgWhite, "Flag missing definition: ", fgBlue, styleBright, right,
+            resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
           )
 
-proc checkBraceScopes(filePath, root: string) =
-  let displayPath = relativePath(filePath, root)
+proc checkBraceScopes(tokens: seq[Token], file, root: string) =
+  let displayPath = relativePath(file, root)
   var
     balance = 0
-    lineNum = 0
     inString = false
     scopeStart = newSeq[int](0)
 
-  for line in lines(filePath):
-    inc lineNum
+  for i, tok in tokens:
+    if tok.lex == "{":
+      inc balance
+      scopeStart.add(tok.line)
+    elif tok.lex == "}":
+      dec balance
 
-    for i, c in line:
-      # 2. Handle quoted strings
-      if c == '"':
-        inString = not inString
-        continue
+      # Optimization: Catch immediate over-closing
+      if balance < 0:
+        # echo "Error: Extra '}' found at ", displayPath, ":", lineNum
+        stdout.styledWriteLine(
+          fgWhite, "Error: ", fgRed, styleBright, "Extra '}' ",
+          resetStyle, fgWhite, " found at ", displayPath, " at line ", $tok.line, ": ", $tok.col
+        )
+        return # Stop early for this file, it's already broken
 
-      if not inString:
-        # 3. The actual counting
-        if c == '#': # comment start, not character in string
-          break
-        elif c == '{':
-          inc balance
-          scopeStart.add(lineNum)
-        elif c == '}':
-          dec balance
-
-          # Optimization: Catch immediate over-closing
-          if balance < 0:
-            # echo "Error: Extra '}' found at ", displayPath, ":", lineNum
-            stdout.styledWriteLine(
-              fgWhite, "Error: ", fgRed, styleBright, "Extra '}' ",
-              resetStyle, fgWhite, " found at ", displayPath, " at line ", $lineNum
-            )
-            return # Stop early for this file, it's already broken
-
-          # If we get here, know we won't error by popping from empty
-          discard scopeStart.pop()
+      # If we get here, know we won't error by popping from empty
+      discard scopeStart.pop()
 
   if balance > 0:
     # echo "Error: Missing ", balance, " closing brace(s) '}' in ", displayPath, "\nLast scope started at:", scopeStart[0]
@@ -166,9 +148,6 @@ proc checkBraceScopes(filePath, root: string) =
       fgWhite, "Error: ", fgRed, styleBright, "Missing ", $balance, " closing brace(s) '}' ",
       resetStyle, fgWhite, " in ", displayPath, "\nLast scope started at line ", $scopeStart[0]
     )
-  elif balance == 0:
-    # echo filePath, " is scope-safe."
-    discard
 
 proc validPath(dirPath: string): bool =
   result = true
@@ -213,7 +192,8 @@ else:
     echo "\nScanning directory for definitions: ", path
     for file in walkDirRec(path):
       if file.endsWith(".txt"):
-        collectDefinitions(file)
+        let tokens = tokenize(readEu4(file))
+        collectDefinitions(tokens)
 
   saveCache(definedModifiers, VANILLA_MODIFIER_CACHE)
   saveCache(definedFlags, VANILLA_FLAG_CACHE)
@@ -221,6 +201,7 @@ else:
 
 
 # First pass through files
+var parsedFileTokens = Table[string, seq[Token]]()
 for dir in config.directories:
   let path = joinPath(config.mod_root, dir)
   if not validPath(path):
@@ -230,9 +211,11 @@ for dir in config.directories:
   for file in walkDirRec(path):
     if file.endsWith(".txt"):
       if file.endsWith(".txt"):
-        checkBraceScopes(file, config.mod_root)
+        let tokens = tokenize(readEu4(file))
+        parsedFileTokens[file] = tokens
+        checkBraceScopes(tokens, file, config.mod_root)
         if not onlyBraces:
-          collectDefinitions(file)
+          collectDefinitions(tokens)
 
 
 if onlyBraces:
@@ -240,14 +223,7 @@ if onlyBraces:
   quit(0)
 
 # Second parser pass
-for dir in config.directories:
-  let path = joinPath(config.mod_root, dir)
-  if not validPath(path):
-    continue
-
-  echo "\nScanning directory for references: ", path
-  for file in walkDirRec(path):
-    if file.endsWith(".txt"):
-      checkReferences(file, config.mod_root)
+for file, tokens in parsedFileTokens:
+  checkReferences(tokens, file, config.mod_root)
 
 echo "\nDone!"
