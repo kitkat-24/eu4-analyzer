@@ -14,40 +14,63 @@ proc readEu4*(filename: string): string =
   if result.startsWith("\xEF\xBB\xBF"):
     result = result[3..^1]
 
-# The Regex Pattern:
-# 1. "(?:\\.|[^"\\])*"  -> Matches double-quoted strings (handling escapes)
-# 2. \{|\}|=|           -> Matches structural symbols: { } =
-# 3. [^\s\{\}#=]+         -> Matches "words" (anything not whitespace/symbol/hash)
-# 4. #.* -> Matches comments from # to end of line
-# r"..." is a raw literal string, which allows specifying a quotatio mark as
-# part of the string with "". We can't start it with """ though because that
-# parses as the start of a multiline string, so we break it up by wrapping the
-# string capture pattern in ()
 proc tokenize*(content: string): seq[Token] {.gcsafe.} =
-  ## Breaks EU4 script content into a stream of meaningful tokens.
-  ## Handles strings, structural symbols, and strips comments.
+  result = newSeqOfCap[Token](content.len div 10)
   var
-    lineNum = 1
-    offset = 0
-    lastLineStart = 0
-  let pattern = re(r"(""(?:\\.|[^""\\])*"")|\{|\}|=|[^\s\{\}#=]+|#.*")
+    i = 0
+    line = 1
+    col = 1
+    lineStart = 0
 
-  for line in splitLines(content):
-    for m in line.findIter(pattern):
-      # for i in offset ..< m.matchBounds.a:
-      #   if content[i] == '\n':
-      #     inc lineNum
-      #     lastLineStart = i + 1
+  while i < content.len:
+    let c = content[i]
 
-      let col = m.matchBounds.a - lastLineStart + 1
-      offset = m.matchBounds.b
+    case c
+    # 1. Handle Whitespace
+    of ' ', '\t', '\r':
+      inc i
+    of '\n':
+      inc line
+      inc i
+      lineStart = i
 
-      # If the token starts with #, it is a comment. We discard it.
-      if m.match.startsWith("#"):
-        continue
+    # 2. Structural Symbols
+    of '{', '}', '=':
+      result.add(Token(lex: $c, line: line, col: i - lineStart + 1))
+      inc i
 
-      result.add(Token(lex: m.match.toLower(), line: lineNum, col: col))
-      inc lineNum
+    # 3. Comments
+    of '#':
+      # Skip until newline
+      while i < content.len and content[i] != '\n':
+        inc i
+
+    # 4. Strings
+    of '"':
+      let startIdx = i
+      let startCol = i - lineStart + 1
+      inc i # skip opening quote
+      while i < content.len:
+        if content[i] == '\\' and i + 1 < content.len:
+          i += 2 # Skip escaped character
+        elif content[i] == '"':
+          inc i # skip closing quote
+          break
+        else:
+          inc i
+      # Add the whole string as one lexeme (lowered if needed)
+      result.add(Token(lex: content[startIdx ..< i].toLower(), line: line, col: startCol))
+
+    # 5. Words (The "Everything Else" state)
+    else:
+      let startIdx = i
+      let startCol = i - lineStart + 1
+      # Continue until we hit whitespace, a symbol, a quote, or a comment
+      while i < content.len and not (content[i] in {' ', '\t', '\r', '\n', '{', '}', '=', '#', '"'}):
+        inc i
+
+      if startIdx < i:
+        result.add(Token(lex: content[startIdx ..< i].toLower(), line: line, col: startCol))
 
 # --- Test Suite ---
 
