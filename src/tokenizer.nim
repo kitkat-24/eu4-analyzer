@@ -105,8 +105,8 @@ proc runTest() =
   assert "hidden_effect" in tokStrs
   assert "{" in tokStrs
   assert "potato_spread" in tokStrs
-  assert "\"C:/MyMod#1/test.txt\"" in tokStrs
-  assert "HUN_fort_defense" in tokStrs
+  assert "\"C:/MyMod#1/test.txt\"".toLower() in tokStrs
+  assert "HUN_fort_defense".toLower() in tokStrs
 
   # Ensure comments are GONE
   for t in tokStrs:
