@@ -1,5 +1,9 @@
-import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sugar, sets, streams, tables, terminal]
+import std/[algorithm, json, nre, os, parseopt, strutils, sequtils, sugar, sets,
+            streams, strformat, tables, times, terminal]
+# nimble packages
+import malebolgia
 import yaml
+# Local modules
 import tokenizer
 
 const VANILLA_MODIFIER_CACHE = "vanilla_modifiers.json" # JSON is faster for large flat sets
@@ -22,6 +26,7 @@ type
     vanilla_root: string
     mod_root: string
     directories: seq[string]
+    ignored: seq[string]
     # definitions: seq[string]
     # references: seq[string]
 
@@ -116,11 +121,9 @@ proc checkReferences(tokens: seq[Token], file, root: string) =
             resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
           )
 
-proc checkBraceScopes(tokens: seq[Token], file, root: string) =
-  let displayPath = relativePath(file, root)
+proc checkBraceScopes(tokens: seq[Token], displayPath: string) =
   var
     balance = 0
-    inString = false
     scopeStart = newSeq[int](0)
 
   for i, tok in tokens:
@@ -201,29 +204,51 @@ else:
 
 
 # First pass through files
-var parsedFileTokens = Table[string, seq[Token]]()
-for dir in config.directories:
-  let path = joinPath(config.mod_root, dir)
-  if not validPath(path):
-    continue
+proc token_pass(file, displayPath: string): seq[Token] {.gcsafe.} =
+  let tokens = tokenize(readEu4(file))
+  checkBraceScopes(tokens, displayPath)
+  return tokens
 
-  echo "\nScanning directory for definitions: ", path
-  for file in walkDirRec(path):
-    if file.endsWith(".txt"):
-      if file.endsWith(".txt"):
-        let tokens = tokenize(readEu4(file))
-        parsedFileTokens[file] = tokens
-        checkBraceScopes(tokens, file, config.mod_root)
-        if not onlyBraces:
-          collectDefinitions(tokens)
+echo "Scanning directories for definitions..."
+let start = cpuTime()
+
+# Collect files
+let files = collect:
+  for dir in config.directories:
+    let path = joinPath(config.mod_root, dir)
+    if not validPath(path):
+      continue
+    for file in walkDirRec(path):
+      let displayPath = relativePath(file, config.mod_root)
+      if file.endsWith(".txt") and displayPath notin config.ignored:
+        file
+
+var parsedTokenSeq = newSeq[seq[Token]](files.len)
+
+# Create a 'master' scope
+# This ensures all spawned tasks finish before code continues past the block
+var m = createMaster()
+m.awaitAll:
+  for i, file in files:
+    let displayPath = relativePath(file, config.mod_root)
+    m.spawn token_pass(file, displayPath) -> parsedTokenSeq[i]
+
+
+echo &"Tokenized in: {(cpuTime() - start) * 1000:.3f} ms"
 
 
 if onlyBraces:
   echo "Braces check only; done!"
   quit(0)
 
-# Second parser pass
-for file, tokens in parsedFileTokens:
+
+# First parser pass: store definitions
+for tokens in parsedTokenSeq:
+  collectDefinitions(tokens)
+
+# Second parser pass: check references
+for i, tokens in parsedTokenSeq:
+  let file = files[i]
   checkReferences(tokens, file, config.mod_root)
 
 echo "\nDone!"

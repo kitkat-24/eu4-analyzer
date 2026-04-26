@@ -23,15 +23,14 @@ proc readEu4*(filename: string): string =
 # part of the string with "". We can't start it with """ though because that
 # parses as the start of a multiline string, so we break it up by wrapping the
 # string capture pattern in ()
-let pattern = re(r"(""(?:\\.|[^""\\])*"")|\{|\}|=|[^\s\{\}#=]+|#.*")
-
-proc tokenize*(content: string): seq[Token] =
+proc tokenize*(content: string): seq[Token] {.gcsafe.} =
   ## Breaks EU4 script content into a stream of meaningful tokens.
   ## Handles strings, structural symbols, and strips comments.
   var
     lineNum = 1
     offset = 0
     lastLineStart = 0
+  let pattern = re(r"(""(?:\\.|[^""\\])*"")|\{|\}|=|[^\s\{\}#=]+|#.*")
 
   for line in splitLines(content):
     for m in line.findIter(pattern):
