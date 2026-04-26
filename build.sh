@@ -1,0 +1,1 @@
+nim c -r -d:ThreadPoolSize=100 src/eu4_analyzer.nim

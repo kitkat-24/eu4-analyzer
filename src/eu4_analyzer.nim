@@ -11,14 +11,17 @@ const VANILLA_FLAG_CACHE = "vanilla_flags.json"
 
 var definedModifiers = HashSet[string]()
 var referencedModifiers = HashSet[string]()
+var definedFunctions = Table[string, HashSet[string]]()
 var definedFlags = HashSet[string]()
 var referencedFlags = HashSet[string]()
+var dynamicFlags = HashSet[string]()
 
-let keyPattern = re"[a-zA-Z]\w*" # Must start with letter then contain letters, numbers, underscores
-let tagPattern = re"[A-Z]{3}" # Match 3 uppercase letters
+let keyPattern = re"^[a-zA-Z]\w*$" # Must start with letter then contain letters, numbers, underscores
+let tagPattern = re"^[A-Z]{3}$" # Match 3 uppercase letters
 let modifierTrigger = re"^has\w+modifier$" # Find various has_X_modifer triggers
 let flagTrigger = re"^has\w+flag$|^flag$" # Find various has_X_flag triggers
 let flagEffect = re"^set\w+flag$" # Find various has_X_flag triggers
+let macroPattern = re"\$\w+\$" # Find replace macros inside a modifier
 
 # YAML parser type
 type
@@ -67,59 +70,75 @@ proc loadCache(filename: string): HashSet[string] =
     echo "Run with the -v flag to build the vanilla cache"
 
 # --- Pass 1: Definitions ---
-proc collectDefinitions(tokens: seq[Token]) =
+proc collectDefinitions(tokens: seq[Token], relPath: string) =
+  var
+    depth = 0 # Top-level scope
+    currFunc = ""
+  let
+    modifierFile = contains(relPath, "modifier")
+    scriptFile   = contains(relPath, "scripted")
+  # const scopes = ["root", "effect", "trigger", "owner", ""]
+
   for i in 1..tokens.len-2:
+    if tokens[i].lex[0] == '{':
+      inc depth
+    elif tokens[i].lex[0] == '}':
+      dec depth
+      if currFunc != "" and depth == 0: # Exited function def scope
+        currFunc = ""
     # Found an expression
-    if tokens[i].lex == "=":
+    elif tokens[i].lex[0] == '=':
       let left = tokens[i-1].lex
       let right = tokens[i+1].lex
-
-      # Flag is set like set_country_flag = HUN_my_cool_flag
-      if left.match(flagEffect).isSome and right.match(keyPattern).isSome:
-        definedFlags.incl(right)
-      # Modifier definition is it's name, e.g. HUN_fort_defense = { ... }
-      elif left.match(keyPattern).isSome and right == "{":
-        definedModifiers.incl(left)
+      # Entering some kind of scope; might be a modifier or scripted function
+      if right[0] == '{':
+        # Modifier definition is its name, e.g. HUN_fort_defense = { ... }
+        if modifierFile and depth == 0 and left.match(keyPattern).isSome:
+          definedModifiers.incl(left)
+        elif scriptFile and depth == 0 and left.match(keyPattern).isSome:
+          definedFunctions[left] = HashSet[string]()
+          currFunc = left
+      # Regular expression, either "assignment" (effect; what we want) or "reference" (trigger; what we don't want (for now))
+      else:
+        # Flag is set like set_country_flag = HUN_my_cool_flag
+        if left.match(flagEffect).isSome:
+          if right.match(keyPattern).isSome:
+            definedFlags.incl(right)
+          # If we're in a function and find a macro (i.e. argument), record that
+          elif currFunc != "":
+            let m = right.match(macroPattern)
+            if m.isSome:
+              definedFunctions[currFunc].incl(m.get.match.replace("$", ""))
+              let pattern = right.replace(re"\$.*?\$", "\\w+")
+              dynamicFlags.incl("^" & pattern & "$")
 
 # --- Pass 2: References ---
-proc checkReferences(tokens: seq[Token], file, root: string) =
+proc checkReferences(tokens: seq[Token], file, root: string, dynamicFlagRegexs: seq[Regex]) =
   let displayPath = relativePath(file, root)
   for i in 1..tokens.len-2:
     # Found an expression
-    if tokens[i].lex == "=":
-      # if tokens.len == 0:
-      #   stdout.styledWriteLine(
-      #     fgYellow, "Warning: ", resetStyle, fgWhite, "Dangling = in ",
-      #     displayPath, " at line ", $lineNum
-      #   )
-      #   continue
-
-      # # Catch multiline expression without opening brace
-      # if tokens.len < 2:
-      #   stdout.styledWriteLine(
-      #     fgYellow, "Warning: ", resetStyle, fgWhite, "Bad assignment style (no open brace or keyword after =) in ",
-      #     displayPath, " at line ", $lineNum
-      #   )
-      #   continue
-
+    if tokens[i].lex[0] == '=':
       let left = tokens[i-1].lex
       let right = tokens[i+1].lex
 
-      if left.match(modifierTrigger).isSome:
+      if right[0] == '{': # starting new scope, not a reference expression
+        continue
+
+      if left.match(modifierTrigger).isSome and right.match(keyPattern).isSome:
         # TODO: Catch $variables$ and error for other malformed modifier references
-        if right.match(tagPattern).isSome or right.match(keyPattern).isNone:
-          continue
         if right notin definedModifiers:
           stdout.styledWriteLine(
             fgWhite, "Modifier missing definition: ", fgCyan, styleBright, right,
             resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
           )
-      elif left.match(flagTrigger).isSome:
+      elif left.match(flagTrigger).isSome and right.match(keyPattern).isSome:
         if right notin definedFlags:
-          stdout.styledWriteLine(
-            fgWhite, "Flag missing definition: ", fgBlue, styleBright, right,
-            resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
-          )
+          # Check all dynamic flags if not a static defined flag
+          if not anyIt(dynamicFlagRegexs, right.match(it).isSome):
+            stdout.styledWriteLine(
+              fgWhite, "Flag missing definition: ", fgBlue, styleBright, right,
+              resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
+            )
 
 proc checkBraceScopes(tokens: seq[Token], displayPath: string) =
   var
@@ -127,10 +146,10 @@ proc checkBraceScopes(tokens: seq[Token], displayPath: string) =
     scopeStart = newSeq[int](0)
 
   for i, tok in tokens:
-    if tok.lex == "{":
+    if tok.lex[0] == '{':
       inc balance
       scopeStart.add(tok.line)
-    elif tok.lex == "}":
+    elif tok.lex[0] == '}':
       dec balance
 
       # Optimization: Catch immediate over-closing
@@ -194,9 +213,10 @@ else:
 
     echo "\nScanning directory for definitions: ", path
     for file in walkDirRec(path):
+      let displayPath = relativePath(file, config.mod_root)
       if file.endsWith(".txt"):
         let tokens = tokenize(readEu4(file))
-        collectDefinitions(tokens)
+        collectDefinitions(tokens, displayPath)
 
   saveCache(definedModifiers, VANILLA_MODIFIER_CACHE)
   saveCache(definedFlags, VANILLA_FLAG_CACHE)
@@ -243,12 +263,16 @@ if onlyBraces:
 
 
 # First parser pass: store definitions
-for tokens in parsedTokenSeq:
-  collectDefinitions(tokens)
+for i, tokens in parsedTokenSeq:
+  let displayPath = relativePath(files[i], config.mod_root)
+  collectDefinitions(tokens, displayPath)
+
+let dynamicFlagRegexs = collect:
+  for item in dynamicFlags: re(item)
 
 # Second parser pass: check references
 for i, tokens in parsedTokenSeq:
   let file = files[i]
-  checkReferences(tokens, file, config.mod_root)
+  checkReferences(tokens, file, config.mod_root, dynamicFlagRegexs)
 
 echo "\nDone!"
