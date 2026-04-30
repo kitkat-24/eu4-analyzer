@@ -1,5 +1,6 @@
 ## Visualize EU4 mission trees
-import std/[browsers, os, parseopt, sequtils, sugar, strformat, strutils, tables, unicode]
+import std/[browsers, os, parseopt, sequtils, sugar, streams, strformat, strutils, tables, unicode]
+import yaml
 # Local modules
 import tokenizer
 
@@ -43,7 +44,7 @@ proc parseMissions(tokens: seq[Token]): seq[Mission] =
         inc j
     else: discard
 
-proc generateMonospaceText(m: Mission, x, y, w, h: int): string =
+proc generateMonospaceText(name:string, x, y, w, h: int): string =
   # CSS Font stack: Consolas is first, then generic monospace
   let fontStack = "Consolas, 'Liberation Mono', Menlo, Courier, monospace"
 
@@ -51,8 +52,7 @@ proc generateMonospaceText(m: Mission, x, y, w, h: int): string =
   <foreignObject x="{x}" y="{y}" width="{w}" height="{h}">
     <div xmlns="http://www.w3.org/1999/xhtml" style="
       display: flex;
-      /* align-items: center; */
-      /* justify-content: flex-start; /* Aligns to top */ */
+      align-items: center;
       height: 100%;
       width: 100%;
       color: #e0e0e0;
@@ -60,14 +60,13 @@ proc generateMonospaceText(m: Mission, x, y, w, h: int): string =
       font-size: 16px;
       line-height: 1.1;
       text-align: center;
-      overflow-wrap: anywhere;  /* Forces wrapping on underscores/long strings */
-      word-break: break-all;    /* Fallback for older engines */
-      white-space: pre-wrap; /* Preserves formatting if you use newlines */
+      word-wrap: break-word;
       overflow: hidden;
-      padding: 5px;
+      padding: 10px;
       box-sizing: border-box;
+      text-justify: auto;
     ">
-      {m.name}
+      {name}
     </div>
   </foreignObject>
   """
@@ -120,10 +119,10 @@ proc generateConnectors(x1, y1, x2, y2: int): string =
           marker-end="url(#arrowhead)" />
     """
 
-proc generateSvg(missions: seq[Mission], filename: string) =
+proc generateSvg(missions: seq[Mission], filename: string, locKeys: Table[string, string]) =
   let
     boxWidth = 150
-    boxHeight = 100
+    boxHeight = 80
     colPad = 25
     rowPad = 40
     colWidth = 2*colPad + boxWidth
@@ -144,7 +143,8 @@ proc generateSvg(missions: seq[Mission], filename: string) =
     svgContent.add fmt"""
       <rect x='{x}' y='{y}' width='{boxWidth}' height='{boxHeight}' rx='5' fill='#4a90e2' />
     """
-    svgContent.add generateMonospaceText(m, x, y, boxWidth, boxHeight)
+    let name = locKeys.getOrDefault(m.name & "_title", m.name)
+    svgContent.add generateMonospaceText(name, x, y, boxWidth, boxHeight)
 
     let (x2, y2) = (x + boxWidth div 2, y)
     for p in m.parents:
@@ -159,25 +159,45 @@ if isMainModule:
   var
     p = initOptParser()
     missionFile = ""
+    locFile = ""
 
   for kind, key, val in p.getopt():
     case kind
     of cmdLongOption, cmdShortOption:
       case key
-      of "help", "h": echo "Usage: mission-viewer path/to/missions.txt"
+      of "help", "h": echo "Usage: mission-viewer path/to/missions.txt [-l/--locFile path/to/loc.yml]"
+      of "locFile", "l": locFile = val
       # Add future flags here
     of cmdArgument:
       missionFile = key # The first non-flag argument is our config path
+      # Only set missionFile if it's currently empty to avoid
+      # capturing trailing whitespace or unintended args
+      # if missionFile == "":
+      #   missionFile = key
     of cmdEnd: assert(false) # Should not happen
 
   assert missionFile != "", "Mission file must be given as the first argument!"
   assert missionFile.fileExists, "Cannot find file: " & missionFile
 
+  echo "Parsing Mission: ", missionFile
+  echo "Using Loc: ", (if locFile == "": "None" else: locFile)
+
+  var locKeys = initTable[string, string]()
+  if locFile != "":
+    if not locFile.fileExists():
+      quit("Could not find localization file: " & locFile)
+    let rawtext = readEu4(locFile)
+    for line in rawtext.splitLines:
+      let bits = filter(map(line.split(":"), s => s.strip()), s => s.len > 0)
+      if bits.len > 1 and bits[0][0] != '#':
+        # Have to strip quotation marks off
+        locKeys[bits[0]] = bits[1][1..<bits[1].len-1]
+
   let tokens = tokenize(readEu4(missionFile))
   let missions = parseMissions(tokens)
 
   let outFile = "missions.svg"
-  generateSvg(missions, outFile)
+  generateSvg(missions, outFile, locKeys)
   let path = outFile.absolutePath()
   # openDefaultBrowser("file://" & path)
 
