@@ -143,7 +143,8 @@ proc generateSvg(missions: seq[Mission], filename: string, locKeys: Table[string
     svgContent.add fmt"""
       <rect x='{x}' y='{y}' width='{boxWidth}' height='{boxHeight}' rx='5' fill='#4a90e2' />
     """
-    let name = locKeys.getOrDefault(m.name & "_title", m.name)
+    # Replace underscore with hyphen so CSS will wrap nicely
+    let name = locKeys.getOrDefault(m.name & "_title", m.name.replace("_", "-"))
     svgContent.add generateMonospaceText(name, x, y, boxWidth, boxHeight)
 
     let (x2, y2) = (x + boxWidth div 2, y)
