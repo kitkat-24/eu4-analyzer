@@ -9,6 +9,8 @@ type
     name: string
     column: int
     row: int
+    hasShield: bool
+    depth: int # Used to track branching missions stacked on top of each other
     parents: seq[string]
 
 proc `$`*(m: Mission): string =
@@ -22,21 +24,30 @@ proc parseMissions(tokens: seq[Token]): seq[Mission] =
     currentMission: Mission
     bracketLevel = 0
     inSeries = false
+    hasCountryShield = false
+    depthCount = Table[(int,int), int]()
 
   for i, t in tokens:
     case t.lex
     of "{":
       inc bracketLevel
       if bracketLevel == 2: # Entered new mission def
-        currentMission = Mission(name: tokens[i-2].lex, column: currentCol)
+        currentMission = Mission(name: tokens[i-2].lex, column: currentCol, hasShield: hasCountryShield)
     of "}":
       dec bracketLevel
       if bracketLevel == 1: # Exited mission def
         result.add(currentMission)
+      if bracketLevel == 0: # Existed column block
+        hasCountryShield = false # Reset
+    of "has_country_shield":
+      hasCountryShield = tokens[i+2].lex == "yes"
     of "slot":
       currentCol = tokens[i+2].lex.parseInt # simplified
     of "position":
       currentMission.row = tokens[i+2].lex.parseInt
+      let loc = (currentMission.column, currentMission.row)
+      currentMission.depth = depthCount.getOrDefault(loc, 0)
+      depthCount[loc] = currentMission.depth + 1
     of "required_missions":
       var j = i + 3
       while tokens[j].lex != "}":
@@ -44,14 +55,15 @@ proc parseMissions(tokens: seq[Token]): seq[Mission] =
         inc j
     else: discard
 
-proc generateMonospaceText(name:string, x, y, w, h: int): string =
+proc generateTextBox(name:string, x, y, w, h: int): string =
   # CSS Font stack: Consolas is first, then generic monospace
-  let fontStack = "Consolas, 'Liberation Mono', Menlo, Courier, monospace"
+  # let fontStack = "Consolas, 'Liberation Mono', Menlo, Courier, monospace"
+  let fontStack = "Helvetica, Arial, sans-serif"
 
   fmt"""
   <foreignObject x="{x}" y="{y}" width="{w}" height="{h}">
     <div xmlns="http://www.w3.org/1999/xhtml" style="
-      display: flex;
+      display: flex-start;
       align-items: center;
       height: 100%;
       width: 100%;
@@ -119,7 +131,27 @@ proc generateConnectors(x1, y1, x2, y2: int): string =
           marker-end="url(#arrowhead)" />
     """
 
-proc generateSvg(missions: seq[Mission], filename: string, locKeys: Table[string, string]) =
+proc generateShieldPath(x, y, w, h: int): string =
+# x,y is mid of shield
+  let
+    wh = w div 2
+    hh = h div 2
+    h4 = h div 4
+    points = [
+      (x-wh, y-hh),      # Top-Left
+      (x+wh, y-hh),      # Top-Right
+      (x+wh, y+h4),      # Mid-Right
+      (x,    y+hh),      # Bottom-Tip
+      (x-wh, y+h4)       # Mid-Left
+    ]
+
+  var pointsStr = ""
+  for p in points:
+    pointsStr.add fmt"{p[0]},{p[1]} "
+
+  fmt"""<polygon points="{pointsStr}" fill="#4a90e2" stroke="#d4af37" stroke-width="3" />"""
+
+proc generateSvg(missions: seq[Mission], filename: string, locKeys: Table[string, string], depth: int) =
   let
     boxWidth = 150
     boxHeight = 80
@@ -128,6 +160,8 @@ proc generateSvg(missions: seq[Mission], filename: string, locKeys: Table[string
     colWidth = 2*colPad + boxWidth
     rowHeight = 2*rowPad + boxHeight
     textPad = 10
+    shieldHeight = 32
+    shieldWidth = 24
 
   let maxRow = missions.mapIt(it.row).max()
   var svgContent = fmt"<svg xmlns='http://www.w3.org/2000/svg' width='{colWidth*5}' height='{rowHeight*maxRow}' style='background: #eeeeee;'>"
@@ -136,21 +170,39 @@ proc generateSvg(missions: seq[Mission], filename: string, locKeys: Table[string
   let missionLocs = collect:
     for m in missions: {m.name: ((m.column-1)*colWidth + colPad, (m.row-1)*rowHeight + rowPad)}
 
+  # Have to collect max depth for knowing whether to display a mission or not
+  # (if max depth == 0 then it's a non-branching slot)
+  var maxDepth = Table[(int,int), int]()
+  for m in missions:
+    let loc = missionLocs[m.name]
+    maxDepth[loc] = max(maxDepth.getOrDefault(loc, 0), m.depth)
+
   for m in missions:
     let (x,y) = missionLocs[m.name]
+    if m.depth != depth and maxDepth[(x,y)] > 0: # Only check depth alignment on branching slots
+      continue
+
+    let boxColor = if maxDepth[(x,y)] > 0: "#d2763d" else: "#4a90e2"
 
     # Draw a simple mission box
     svgContent.add fmt"""
-      <rect x='{x}' y='{y}' width='{boxWidth}' height='{boxHeight}' rx='5' fill='#4a90e2' />
+      <rect x='{x}' y='{y}' width='{boxWidth}' height='{boxHeight}' rx='5' fill='{boxColor}' />
     """
     # Replace underscore with hyphen so CSS will wrap nicely
     let name = locKeys.getOrDefault(m.name & "_title", m.name.replace("_", "-"))
-    svgContent.add generateMonospaceText(name, x, y, boxWidth, boxHeight)
+    svgContent.add generateTextBox(name, x, y, boxWidth, boxHeight)
 
     let (x2, y2) = (x + boxWidth div 2, y)
     for p in m.parents:
       let (x1, startY) = (missionLocs[p][0] + boxWidth div 2, missionLocs[p][1] + boxHeight)
       svgContent.add generateConnectors(x1, startY, x2, y2)
+
+  # Draw shields on top of missions and connectors
+  for m in missions:
+    let (x,y) = missionLocs[m.name]
+    if m.depth != depth and maxDepth[(x,y)] > 0: # Only check depth alignment on branching slots
+      continue
+    svgContent.add generateShieldPath(x+boxWidth div 2, y + boxHeight, shieldWidth, shieldHeight)
 
   svgContent.add "</svg>"
   writeFile(filename, svgContent)
@@ -161,6 +213,8 @@ if isMainModule:
     p = initOptParser()
     missionFile = ""
     locFile = ""
+    openBrowser = false
+    depth = 0
 
   for kind, key, val in p.getopt():
     case kind
@@ -168,7 +222,8 @@ if isMainModule:
       case key
       of "help", "h": echo "Usage: mission-viewer path/to/missions.txt [-l/--locFile path/to/loc.yml]"
       of "locFile", "l": locFile = val
-      # Add future flags here
+      of "browser", "b": openBrowser = true
+      of "depth", "d": depth = val.parseInt
     of cmdArgument:
       missionFile = key # The first non-flag argument is our config path
       # Only set missionFile if it's currently empty to avoid
@@ -198,7 +253,9 @@ if isMainModule:
   let missions = parseMissions(tokens)
 
   let outFile = "missions.svg"
-  generateSvg(missions, outFile, locKeys)
-  let path = outFile.absolutePath()
-  # openDefaultBrowser("file://" & path)
+  generateSvg(missions, outFile, locKeys, depth)
+
+  if openBrowser:
+    let path = outFile.absolutePath()
+    openDefaultBrowser("file://" & path)
 
