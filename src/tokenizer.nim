@@ -1,11 +1,29 @@
-import std/[nre, strutils, sugar]
+import std/[strformat, strutils, sugar, terminal]
 
 
 type
+  TokenKind = enum
+    lBrak,
+    rBrak
+    eq,
+    rawStr,
+    identifier
   Token* = object
     lex*: string
     line*: int
     col*: int
+    kind*: TokenKind
+
+  ExprKind = enum
+    scoped,
+    expression,
+  Expr {.acyclic} = ref object
+    case kind: ExprKind
+    of scoped:
+      name: string
+      children: seq[Expr]
+    of expression:
+      left, right: string
 
 
 proc readEu4*(filename: string): string =
@@ -13,6 +31,15 @@ proc readEu4*(filename: string): string =
   # Strip UTF-8 BOM if present
   if result.startsWith("\xEF\xBB\xBF"):
     result = result[3..^1]
+
+# For a valid token, will get the kind from the first char of the string
+func getTokenKind(c: char): TokenKind =
+  case c
+  of '{': result = lBrak
+  of '}': result = rBrak
+  of '=': result = eq
+  of '"': result = rawStr
+  else:   result = identifier
 
 proc tokenize*(content: string): seq[Token] {.gcsafe.} =
   result = newSeqOfCap[Token](content.len div 10)
@@ -36,7 +63,7 @@ proc tokenize*(content: string): seq[Token] {.gcsafe.} =
 
     # 2. Structural Symbols
     of '{', '}', '=':
-      result.add(Token(lex: $c, line: line, col: i - lineStart + 1))
+      result.add(Token(lex: $c, line: line, col: i - lineStart + 1, kind: getTokenKind(c)))
       inc i
 
     # 3. Comments
@@ -59,7 +86,7 @@ proc tokenize*(content: string): seq[Token] {.gcsafe.} =
         else:
           inc i
       # Add the whole string as one lexeme (lowered if needed)
-      result.add(Token(lex: content[startIdx ..< i].toLower(), line: line, col: startCol))
+      result.add(Token(lex: content[startIdx ..< i].toLower(), line: line, col: startCol, kind: rawStr))
 
     # 5. Words (The "Everything Else" state)
     else:
@@ -70,7 +97,71 @@ proc tokenize*(content: string): seq[Token] {.gcsafe.} =
         inc i
 
       if startIdx < i:
-        result.add(Token(lex: content[startIdx ..< i].toLower(), line: line, col: startCol))
+        result.add(Token(lex: content[startIdx ..< i].toLower(), line: line, col: startCol, kind: identifier))
+
+proc printLineError(msg, displayPath: string, line, col: int) =
+  stdout.styledWriteLine(
+    fgRed, styleBright, "Error: ", resetStyle, fgWhite, msg,
+    " found at ", displayPath, " at line ", $line, ": ", $col
+  )
+
+# Builds the DST (Dumb Syntax Tree) of very simple expression and scope objects
+proc buildDST*(tokens: seq[Token], displayPath: string): seq[Expr] =
+  # We use a 'dummy' root node to act as the top-level container
+  let root = Expr(kind: scoped, name: "ROOT", children: @[])
+  var
+    stack: seq[Expr] = @[root]
+    scopeStart = newSeq[int]()
+    i = 0
+
+  while i < tokens.len:
+    # It's a scope: name = {
+    if i + 2 < tokens.len and tokens[i+1].kind == eq and tokens[i+2].kind == lBrak:
+      let newScope = Expr(kind: scoped, name: tokens[i].lex, children: @[])
+      stack[^1].children.add(newScope) # Add to current active scope
+      stack.add(newScope)              # Push object so IT becomes the active scope
+      scopeStart.add(i)
+      i += 3 # Skip 'name', '=', and '{'
+      continue
+    # 2. Lookahead for 'key = value'
+    if i + 2 < tokens.len and tokens[i+1].kind == eq:
+      let e = Expr(kind: expression, left: tokens[i].lex, right: tokens[i+2].lex)
+      stack[^1].children.add(e)
+      i += 3
+      continue
+
+    # 2. Handle Closing Scopes
+    if tokens[i].kind == rBrak:
+      if stack.len > 1:
+        discard stack.pop()
+        discard scopeStart.pop()
+      else:
+        printLineError("Extra '}'", displayPath, tokens[i].line, tokens[i].col)
+      inc i
+      continue
+
+    inc i
+
+  if stack.len > 1:
+    let ti = scopeStart[0]
+    printLineError("Missing " & $(stack.len-1) & " closing brace(s) '}'", displayPath, tokens[ti].line, tokens[ti].col)
+  return stack[0].children # Return the top-level list
+
+
+# Print a DST for debugging purposes
+proc dumpDST*(expressions: seq[Expr], indent = 0) =
+  let prefix = "\t".repeat(indent)
+  for e in expressions:
+    case e.kind
+    of expression:
+      echo fmt"{prefix}{e.left} = {e.right}"
+    of scoped:
+      # Difficult to escape the left bracket in a format string without it
+      # seeing the next few lines and closing bracket as one big string capture
+      echo "$1$2 = {" % [prefix, e.name]
+      # Recursively print children with increased indentation
+      dumpDST(e.children, indent + 1)
+      echo fmt"{prefix}}}"
 
 # --- Test Suite ---
 
@@ -115,5 +206,11 @@ proc runTest() =
 
   echo "Success: Tokenizer handled strings, comments, and symbols correctly!"
 
+proc dstTest() =
+  let tokens = tokenize(readEu4("test/test_event_file.txt"))
+  let dst = buildDST(tokens, "test/test_event_file.txt")
+  dumpDST(dst)
+
 if isMainModule:
-  runTest()
+  # runTest()
+  dstTest()

@@ -161,8 +161,7 @@ proc checkBraceScopes(tokens: seq[Token], displayPath: string) =
         )
         return # Stop early for this file, it's already broken
 
-      # If we get here, know we won't error by popping from empty
-      discard scopeStart.pop()
+      # If we get here, know we won't error by popping from empty discard scopeStart.pop()
 
   if balance > 0:
     # echo "Error: Missing ", balance, " closing brace(s) '}' in ", displayPath, "\nLast scope started at:", scopeStart[0]
