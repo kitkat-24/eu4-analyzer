@@ -140,36 +140,6 @@ proc checkReferences(tokens: seq[Token], file, root: string, dynamicFlagRegexs: 
               resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
             )
 
-proc checkBraceScopes(tokens: seq[Token], displayPath: string) =
-  var
-    balance = 0
-    scopeStart = newSeq[int](0)
-
-  for i, tok in tokens:
-    if tok.lex[0] == '{':
-      inc balance
-      scopeStart.add(tok.line)
-    elif tok.lex[0] == '}':
-      dec balance
-
-      # Optimization: Catch immediate over-closing
-      if balance < 0:
-        # echo "Error: Extra '}' found at ", displayPath, ":", lineNum
-        stdout.styledWriteLine(
-          fgWhite, "Error: ", fgRed, styleBright, "Extra '}' ",
-          resetStyle, fgWhite, " found at ", displayPath, " at line ", $tok.line, ": ", $tok.col
-        )
-        return # Stop early for this file, it's already broken
-
-      # If we get here, know we won't error by popping from empty discard scopeStart.pop()
-
-  if balance > 0:
-    # echo "Error: Missing ", balance, " closing brace(s) '}' in ", displayPath, "\nLast scope started at:", scopeStart[0]
-    stdout.styledWriteLine(
-      fgWhite, "Error: ", fgRed, styleBright, "Missing ", $balance, " closing brace(s) '}' ",
-      resetStyle, fgWhite, " in ", displayPath, "\nLast scope started at line ", $scopeStart[0]
-    )
-
 proc validPath(dirPath: string): bool =
   result = true
   if not dirExists(dirPath):
