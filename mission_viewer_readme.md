@@ -17,7 +17,7 @@ Run the tool from the command line by providing the mission file path and desire
 | Flag / Argument | Description |
 | :--- | :--- |
 | `mission_file` | **Required.** The path to the EU4 `.txt` mission script. Must be the first non-flag argument. |
-| `-l`, `--locFile` | Path to the localization file. If provided, the tool will replace mission ids with the `mission_title` loc strings. |
+| `-l`, `--locFile` | Path to the `.yml` localization file. If provided, the tool will replace mission ids with the `mission_name_title` loc strings. |
 | `-b`, `--browser` | A boolean flag. When present, automatically opens the resulting SVG in your default web browser. |
 | `-d`, `--depth` | An integer value used to filter which missions to display in a branching slot. Defaults to `0`. |
 | `-h`, `--help` | Displays the basic usage help message. |
