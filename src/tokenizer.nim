@@ -14,16 +14,17 @@ type
     col*: int
     kind*: TokenKind
 
-  ExprKind = enum
+  ExprKind* = enum
     scoped,
     expression,
-  Expr {.acyclic} = ref object
-    case kind: ExprKind
+  Expr* {.acyclic} = ref object
+    case kind*: ExprKind
     of scoped:
-      name: string
-      children: seq[Expr]
+      name*: string
+      children*: seq[Expr]
     of expression:
-      left, right: string
+      left*, right*: string
+    line*, col*: int # col is the first character of the expression
 
 
 proc readEu4*(filename: string): string =
@@ -99,14 +100,14 @@ proc tokenize*(content: string): seq[Token] {.gcsafe.} =
       if startIdx < i:
         result.add(Token(lex: content[startIdx ..< i].toLower(), line: line, col: startCol, kind: identifier))
 
-proc printLineError(msg, displayPath: string, line, col: int) =
+proc printLineError*(msg, displayPath: string, line, col: int) =
   stdout.styledWriteLine(
     fgRed, styleBright, "Error: ", resetStyle, fgWhite, msg,
     " found at ", displayPath, " at line ", $line, ": ", $col
   )
 
 # Builds the DST (Dumb Syntax Tree) of very simple expression and scope objects
-proc buildDST*(tokens: seq[Token], displayPath: string): seq[Expr] =
+proc buildDST*(tokens: seq[Token], displayPath: string): seq[Expr] {.gcsafe.} =
   # We use a 'dummy' root node to act as the top-level container
   let root = Expr(kind: scoped, name: "ROOT", children: @[])
   var
@@ -117,7 +118,8 @@ proc buildDST*(tokens: seq[Token], displayPath: string): seq[Expr] =
   while i < tokens.len:
     # It's a scope: name = {
     if i + 2 < tokens.len and tokens[i+1].kind == eq and tokens[i+2].kind == lBrak:
-      let newScope = Expr(kind: scoped, name: tokens[i].lex, children: @[])
+      let newScope = Expr(kind: scoped, name: tokens[i].lex, children: @[], line: tokens[i].line,
+                          col: tokens[i].col)
       stack[^1].children.add(newScope) # Add to current active scope
       stack.add(newScope)              # Push object so IT becomes the active scope
       scopeStart.add(i)
@@ -125,7 +127,8 @@ proc buildDST*(tokens: seq[Token], displayPath: string): seq[Expr] =
       continue
     # 2. Lookahead for 'key = value'
     if i + 2 < tokens.len and tokens[i+1].kind == eq:
-      let e = Expr(kind: expression, left: tokens[i].lex, right: tokens[i+2].lex)
+      let e = Expr(kind: expression, left: tokens[i].lex, right: tokens[i+2].lex, line: tokens[i].line,
+                   col: tokens[i].col)
       stack[^1].children.add(e)
       i += 3
       continue

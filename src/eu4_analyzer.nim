@@ -69,76 +69,84 @@ proc loadCache(filename: string): HashSet[string] =
     echo "No vanilla cache found. Proceeding with mod-only keys."
     echo "Run with the -v flag to build the vanilla cache"
 
-# --- Pass 1: Definitions ---
-proc collectDefinitions(tokens: seq[Token], relPath: string) =
-  var
-    depth = 0 # Top-level scope
-    currFunc = ""
-  let
-    modifierFile = contains(relPath, "modifier")
-    scriptFile   = contains(relPath, "scripted")
-  # const scopes = ["root", "effect", "trigger", "owner", ""]
+# Context object used for definition recursion
+type
+  Context = object
+    relPath: string
+    isModifierFile: bool
+    isScriptFile: bool
+    currentFunction: string # Tracks the name of the enclosing function def
+    depth: int
+proc initContext(relPath: string): Context =
+  Context(relPath: relPath, isModifierFile: contains(relPath, "modifier"), isScriptFile: contains(relPath, "scripted"))
 
-  for i in 1..tokens.len-2:
-    if tokens[i].lex[0] == '{':
-      inc depth
-    elif tokens[i].lex[0] == '}':
-      dec depth
-      if currFunc != "" and depth == 0: # Exited function def scope
-        currFunc = ""
-    # Found an expression
-    elif tokens[i].lex[0] == '=':
-      let left = tokens[i-1].lex
-      let right = tokens[i+1].lex
-      # Entering some kind of scope; might be a modifier or scripted function
-      if right[0] == '{':
-        # Modifier definition is its name, e.g. HUN_fort_defense = { ... }
-        if modifierFile and depth == 0 and left.match(keyPattern).isSome:
-          definedModifiers.incl(left)
-        elif scriptFile and depth == 0 and left.match(keyPattern).isSome:
-          definedFunctions[left] = HashSet[string]()
-          currFunc = left
-      # Regular expression, either "assignment" (effect; what we want) or "reference" (trigger; what we don't want (for now))
-      else:
-        # Flag is set like set_country_flag = HUN_my_cool_flag
-        if left.match(flagEffect).isSome:
-          if right.match(keyPattern).isSome:
-            definedFlags.incl(right)
-          # If we're in a function and find a macro (i.e. argument), record that
-          elif currFunc != "":
-            let m = right.match(macroPattern)
-            if m.isSome:
-              definedFunctions[currFunc].incl(m.get.match.replace("$", ""))
-              let pattern = right.replace(re"\$.*?\$", "\\w+")
-              dynamicFlags.incl("^" & pattern & "$")
+# --- Pass 1: Definitions ---
+proc collectDefinitions(expressions: seq[Expr], ctx: Context) =
+  for e in expressions:
+    case e.kind
+    of expression:
+      # --- Handle Regular Assignments ---
+      # Example: set_country_flag = HUN_my_cool_flag
+      # Regular expression, either "assignment" (effect; what we want) or
+      # "reference" (trigger; what we don't want (for now))
+      # Flag is set like set_country_flag = HUN_my_cool_flag
+      if e.left.match(flagEffect).isSome:
+        definedFlags.incl(e.right)
+
+        # Track macro arguments used in functions
+        if ctx.currentFunction != "" and e.right.contains("$"):
+          let macroName = e.right.replace("$", "")
+          definedFunctions[ctx.currentFunction].incl(macroName)
+              # let m = right.match(macroPattern)
+              # if m.isSome:
+              #   definedFunctions[currFunc].incl(m.get.match.replace("$", ""))
+              #   let pattern = right.replace(re"\$.*?\$", "\\w+")
+              #   dynamicFlags.incl("^" & pattern & "$")
+
+    of scoped:
+      # --- Handle Scope Entry ---
+      var nextCtx = ctx # Copy the current context
+      nextCtx.depth += 1
+
+      if ctx.depth == 0:
+        # We are at the root; check if this is a definition
+        if ctx.isModifierFile:
+          definedModifiers.incl(e.name)
+        elif ctx.isScriptFile:
+          definedFunctions[e.name] = HashSet[string]()
+          nextCtx.currentFunction = e.name # Record that children are inside this function
+
+      # Recurse into children with the updated context
+      collectDefinitions(e.children, nextCtx)
 
 # --- Pass 2: References ---
-proc checkReferences(tokens: seq[Token], file, root: string, dynamicFlagRegexs: seq[Regex]) =
-  let displayPath = relativePath(file, root)
-  for i in 1..tokens.len-2:
-    # Found an expression
-    if tokens[i].lex[0] == '=':
-      let left = tokens[i-1].lex
-      let right = tokens[i+1].lex
-
-      if right[0] == '{': # starting new scope, not a reference expression
-        continue
-
-      if left.match(modifierTrigger).isSome and right.match(keyPattern).isSome:
+proc checkReferences(expressions: seq[Expr], ctx: Context, dynamicFlagRegexs: openArray[Regex]) =
+  for e in expressions:
+    case e.kind
+    of expression:
+      # Should we enforce that right matches keyPattern?
+      if e.left.match(modifierTrigger).isSome:
         # TODO: Catch $variables$ and error for other malformed modifier references
-        if right notin definedModifiers:
-          stdout.styledWriteLine(
-            fgWhite, "Modifier missing definition: ", fgCyan, styleBright, right,
-            resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
-          )
-      elif left.match(flagTrigger).isSome and right.match(keyPattern).isSome:
-        if right notin definedFlags:
+        if e.right notin definedModifiers:
+          printLineError(fmt"Modifier {e.right} missing definition", ctx.relPath, e.line, e.col)
+          # stdout.styledWriteLine(
+          #   fgWhite, "Modifier missing definition: ", fgCyan, styleBright, right,
+          #   resetStyle, fgWhite, " in ", ctx.relPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
+          # )
+      # Should we enforce that right matches keyPattern?
+      elif e.left.match(flagTrigger).isSome:
+        if e.right notin definedFlags:
           # Check all dynamic flags if not a static defined flag
-          if not anyIt(dynamicFlagRegexs, right.match(it).isSome):
-            stdout.styledWriteLine(
-              fgWhite, "Flag missing definition: ", fgBlue, styleBright, right,
-              resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
-            )
+          if not anyIt(dynamicFlagRegexs, e.right.match(it).isSome):
+            printLineError(fmt"Flag {e.right} missing definition", ctx.relPath, e.line, e.col)
+            # stdout.styledWriteLine(
+            #   fgWhite, "Flag missing definition: ", fgBlue, styleBright, right,
+            #   resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
+            # )
+
+    of scoped:
+      # Recurse into children with the same context
+      checkReferences(e.children, ctx, dynamicFlagRegexs)
 
 proc validPath(dirPath: string): bool =
   result = true
@@ -166,8 +174,27 @@ for kind, key, val in p.getopt():
     configFile = key # The first non-flag argument is our config path
   of cmdEnd: assert(false) # Should not happen
 
+proc collectFilesInDirs(root: string, directories, ignored: seq[string]): seq[string] =
+  collect:
+    for dir in directories:
+      let path = joinPath(root, dir)
+      if not validPath(path):
+        continue
+      for file in walkDirRec(path):
+        let displayPath = relativePath(file, root)
+        if file.endsWith(".txt") and displayPath notin ignored:
+          file
+
+# Processing of individual file
+proc token_pass(file, displayPath: string): seq[Expr] {.gcsafe.} =
+  let tokens = tokenize(readEu4(file))
+  result = buildDST(tokens, displayPath)
+
 
 let config = loadConfig(configFile)
+# Create a 'master' scope
+# This ensures all spawned tasks finish before code continues past the block
+var m = createMaster()
 
 # 1. Load vanilla cache if we aren't rebuilding it
 if not vanillaMode and fileExists(VANILLA_MODIFIER_CACHE) and fileExists(VANILLA_FLAG_CACHE):
@@ -175,52 +202,43 @@ if not vanillaMode and fileExists(VANILLA_MODIFIER_CACHE) and fileExists(VANILLA
   definedFlags = loadCache(VANILLA_FLAG_CACHE)
 # 2. Else process vanilla cache
 else:
-  for dir in config.directories:
-    let path = joinPath(config.vanilla_root, dir)
-    if not validPath(path):
-      continue
+  let vanillaFiles = collectFilesInDirs(config.vanilla_root, config.directories, config.ignored)
+  var vanillaDSTs = newSeq[seq[Expr]](vanillaFiles.len)
+  echo fmt"Scanning vanilla files in {config.vanilla_root}..."
+  let vanillaStart = cpuTime()
 
-    echo "\nScanning directory for definitions: ", path
-    for file in walkDirRec(path):
-      let displayPath = relativePath(file, config.mod_root)
-      if file.endsWith(".txt"):
-        let tokens = tokenize(readEu4(file))
-        collectDefinitions(tokens, displayPath)
+  # Read & parse DST in parallel
+  m.awaitAll:
+    for i, file in vanillaFiles:
+      let displayPath = relativePath(file, config.vanilla_root)
+      m.spawn token_pass(file, displayPath) -> vanillaDSTs[i]
+
+  # Do simpler definition check in sequence
+  for i, file in vanillaFiles:
+    let dst = vanillaDSTs
+    let displayPath = relativePath(file, config.vanilla_root)
+    let initialCtx = initContext(displayPath)
+    collectDefinitions(vanillaDSTs[i], initialCtx)
+
+  echo &"Tokenized in: {(cpuTime() - vanillaStart) * 1000:.3f} ms"
 
   saveCache(definedModifiers, VANILLA_MODIFIER_CACHE)
   saveCache(definedFlags, VANILLA_FLAG_CACHE)
   echo "\nVanilla processing complete. Cache saved.\n-------------------------------\n"
 
 
-# First pass through files
-proc token_pass(file, displayPath: string): seq[Token] {.gcsafe.} =
-  let tokens = tokenize(readEu4(file))
-  checkBraceScopes(tokens, displayPath)
-  return tokens
-
 echo "Scanning directories for definitions..."
 let start = cpuTime()
 
 # Collect files
-let files = collect:
-  for dir in config.directories:
-    let path = joinPath(config.mod_root, dir)
-    if not validPath(path):
-      continue
-    for file in walkDirRec(path):
-      let displayPath = relativePath(file, config.mod_root)
-      if file.endsWith(".txt") and displayPath notin config.ignored:
-        file
+let files = collectFilesInDirs(config.mod_root, config.directories, config.ignored)
 
-var parsedTokenSeq = newSeq[seq[Token]](files.len)
+var modDSTs = newSeq[seq[Expr]](files.len)
 
-# Create a 'master' scope
-# This ensures all spawned tasks finish before code continues past the block
-var m = createMaster()
 m.awaitAll:
   for i, file in files:
     let displayPath = relativePath(file, config.mod_root)
-    m.spawn token_pass(file, displayPath) -> parsedTokenSeq[i]
+    m.spawn token_pass(file, displayPath) -> modDSTs[i]
 
 
 echo &"Tokenized in: {(cpuTime() - start) * 1000:.3f} ms"
@@ -232,16 +250,16 @@ if onlyBraces:
 
 
 # First parser pass: store definitions
-for i, tokens in parsedTokenSeq:
-  let displayPath = relativePath(files[i], config.mod_root)
-  collectDefinitions(tokens, displayPath)
+for i, exprs in modDSTs:
+  let initialCtx = initContext(relativePath(files[i], config.mod_root))
+  collectDefinitions(exprs, initialCtx)
 
 let dynamicFlagRegexs = collect:
   for item in dynamicFlags: re(item)
 
 # Second parser pass: check references
-for i, tokens in parsedTokenSeq:
-  let file = files[i]
-  checkReferences(tokens, file, config.mod_root, dynamicFlagRegexs)
+for i, exprs in modDSTs:
+  let initialCtx = initContext(relativePath(files[i], config.mod_root))
+  checkReferences(exprs, initialCtx, dynamicFlagRegexs)
 
 echo "\nDone!"
