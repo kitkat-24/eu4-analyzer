@@ -9,22 +9,9 @@ import tokenizer
 const VANILLA_MODIFIER_CACHE = "vanilla_modifiers.json" # JSON is faster for large flat sets
 const VANILLA_FLAG_CACHE = "vanilla_flags.json"
 
-var definedModifiers = HashSet[string]()
-var referencedModifiers = HashSet[string]()
-var definedFunctions = Table[string, HashSet[string]]()
-var definedFlags = HashSet[string]()
-var referencedFlags = HashSet[string]()
-var dynamicFlags = HashSet[string]()
 
-let keyPattern = re"^[a-zA-Z]\w*$" # Must start with letter then contain letters, numbers, underscores
-let tagPattern = re"^[A-Z]{3}$" # Match 3 uppercase letters
-let modifierTrigger = re"^has\w+modifier$" # Find various has_X_modifer triggers
-let flagTrigger = re"^has\w+flag$|^flag$" # Find various has_X_flag triggers
-let flagEffect = re"^set\w+flag$" # Find various has_X_flag triggers
-let macroPattern = re"\$\w+\$" # Find replace macros inside a modifier
-
-# YAML parser type
 type
+  # YAML parser type
   Config = object
     vanilla_root: string
     mod_root: string
@@ -32,6 +19,30 @@ type
     ignored: seq[string]
     # definitions: seq[string]
     # references: seq[string]
+  FuncDef = ref object
+    file: string
+    line: int
+    name: string
+    definedFlags: seq[string]
+  FuncCall = object
+    name: string
+    args: seq[(string, string)]
+
+
+var definedModifiers = HashSet[string]()
+var referencedModifiers = HashSet[string]()
+var definedFlags = HashSet[string]()
+var referencedFlags = HashSet[string]()
+var dynamicFlags = HashSet[string]()
+var funcs = Table[string, FuncDef]()
+var funcCalls = newSeq[FuncCall]()
+
+let keyPattern = re"^[a-zA-Z]\w*$" # Must start with letter then contain letters, numbers, underscores
+let tagPattern = re"^[A-Z]{3}$" # Match 3 uppercase letters
+let modifierTrigger = re"^has\w+modifier$" # Find various has_X_modifer triggers
+let flagTrigger = re"^has\w+flag$|^flag$" # Find various has_X_flag triggers
+let flagEffect = re"^set\w+flag$" # Find various has_X_flag triggers
+let macroPattern = re"\$\w+\$" # Find replace macros inside a modifier
 
 proc loadConfig(path: string): Config =
   var s = newFileStream(path, fmRead)
@@ -75,7 +86,7 @@ type
     relPath: string
     isModifierFile: bool
     isScriptFile: bool
-    currentFunction: string # Tracks the name of the enclosing function def
+    currentFunction: FuncDef # Tracks the name of the enclosing function def
     depth: int
 proc initContext(relPath: string): Context =
   Context(relPath: relPath, isModifierFile: contains(relPath, "modifier"), isScriptFile: contains(relPath, "scripted"))
@@ -91,17 +102,13 @@ proc collectDefinitions(expressions: seq[Expr], ctx: Context) =
       # "reference" (trigger; what we don't want (for now))
       # Flag is set like set_country_flag = HUN_my_cool_flag
       if e.left.match(flagEffect).isSome:
-        definedFlags.incl(e.right)
-
         # Track macro arguments used in functions
-        if ctx.currentFunction != "" and e.right.contains("$"):
-          let macroName = e.right.replace("$", "")
-          definedFunctions[ctx.currentFunction].incl(macroName)
-              # let m = right.match(macroPattern)
-              # if m.isSome:
-              #   definedFunctions[currFunc].incl(m.get.match.replace("$", ""))
-              #   let pattern = right.replace(re"\$.*?\$", "\\w+")
-              #   dynamicFlags.incl("^" & pattern & "$")
+        if ctx.currentFunction != nil and e.right.contains("$"):
+          ctx.currentFunction.definedFlags.add(e.right)
+        else:
+          definedFlags.incl(e.right)
+      elif ctx.currentFunction != nil and e.left.match(flagTrigger) and e.right.contains("$"):
+        ctx.currentFunction.def
 
     of scoped:
       # --- Handle Scope Entry ---
@@ -113,14 +120,35 @@ proc collectDefinitions(expressions: seq[Expr], ctx: Context) =
         if ctx.isModifierFile:
           definedModifiers.incl(e.name)
         elif ctx.isScriptFile:
-          definedFunctions[e.name] = HashSet[string]()
-          nextCtx.currentFunction = e.name # Record that children are inside this function
+          nextCtx.currentFunction = FuncDef(name: e.name, line: e.line, file: ctx.relPath)
 
       # Recurse into children with the updated context
       collectDefinitions(e.children, nextCtx)
 
+      let f = nextCtx.currentFunction
+      if f != nil and ctx.depth == 0:
+        if f.name in funcs:
+          printLineError(fmt"Redefinition of function {f.name}", ctx.relPath, e.line, e.col)
+        else:
+          funcs[f.name] = f
+
+proc collectFuncCalls(expressions: seq[Expr]) =
+  for e in expressions:
+    if e.kind == scoped:
+      # If this function name has been defined and all chilren are expressions,
+      # hopefully it's a function call of the form:
+      # custom_trigger = { tag = FOO religion = mr_cathar }
+      if e.name in funcs and all(e.children, c => c.kind == expression):
+        for c in e.children:
+          let dyn_str = fmt"${c.left}$"
+          for flag in filter(funcs[e.name].definedFlags, s => s.contains(dyn_str)):
+            definedFlags.incl(flag.replace(dyn_str, c.right))
+      else:
+        collectFuncCalls(e.children)
+
+
 # --- Pass 2: References ---
-proc checkReferences(expressions: seq[Expr], ctx: Context, dynamicFlagRegexs: openArray[Regex]) =
+proc checkReferences(expressions: seq[Expr], ctx: Context) =
   for e in expressions:
     case e.kind
     of expression:
@@ -136,17 +164,15 @@ proc checkReferences(expressions: seq[Expr], ctx: Context, dynamicFlagRegexs: op
       # Should we enforce that right matches keyPattern?
       elif e.left.match(flagTrigger).isSome:
         if e.right notin definedFlags:
-          # Check all dynamic flags if not a static defined flag
-          if not anyIt(dynamicFlagRegexs, e.right.match(it).isSome):
-            printLineError(fmt"Flag {e.right} missing definition", ctx.relPath, e.line, e.col)
-            # stdout.styledWriteLine(
-            #   fgWhite, "Flag missing definition: ", fgBlue, styleBright, right,
-            #   resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
-            # )
+          printLineError(fmt"Flag {e.right} missing definition", ctx.relPath, e.line, e.col)
+          # stdout.styledWriteLine(
+          #   fgWhite, "Flag missing definition: ", fgBlue, styleBright, right,
+          #   resetStyle, fgWhite, " in ", displayPath, " at line ", $tokens[i+1].line, ": ", $tokens[i+1].col
+          # )
 
     of scoped:
       # Recurse into children with the same context
-      checkReferences(e.children, ctx, dynamicFlagRegexs)
+      checkReferences(e.children, ctx)
 
 proc validPath(dirPath: string): bool =
   result = true
@@ -215,10 +241,14 @@ else:
 
   # Do simpler definition check in sequence
   for i, file in vanillaFiles:
-    let dst = vanillaDSTs
     let displayPath = relativePath(file, config.vanilla_root)
     let initialCtx = initContext(displayPath)
     collectDefinitions(vanillaDSTs[i], initialCtx)
+  for dst in vanillaDSTs:
+    collectFuncCalls(dst)
+
+  # Clear for mod overwrites to not trigger redefinition error
+  funcs.clear()
 
   echo &"Tokenized in: {(cpuTime() - vanillaStart) * 1000:.3f} ms"
 
@@ -253,13 +283,12 @@ if onlyBraces:
 for i, exprs in modDSTs:
   let initialCtx = initContext(relativePath(files[i], config.mod_root))
   collectDefinitions(exprs, initialCtx)
-
-let dynamicFlagRegexs = collect:
-  for item in dynamicFlags: re(item)
+for dst in modDSTs:
+  collectFuncCalls(dst)
 
 # Second parser pass: check references
 for i, exprs in modDSTs:
   let initialCtx = initContext(relativePath(files[i], config.mod_root))
-  checkReferences(exprs, initialCtx, dynamicFlagRegexs)
+  checkReferences(exprs, initialCtx)
 
 echo "\nDone!"

@@ -1,4 +1,4 @@
-import std/[strformat, strutils, sugar, terminal]
+import std/[nre, strformat, strutils, sugar, terminal]
 
 
 type
@@ -106,10 +106,12 @@ proc printLineError*(msg, displayPath: string, line, col: int) =
     " found at ", displayPath, " at line ", $line, ": ", $col
   )
 
+
 # Builds the DST (Dumb Syntax Tree) of very simple expression and scope objects
 proc buildDST*(tokens: seq[Token], displayPath: string): seq[Expr] {.gcsafe.} =
   # We use a 'dummy' root node to act as the top-level container
   let root = Expr(kind: scoped, name: "ROOT", children: @[])
+  let modifierPattern = re"^\w+$"
   var
     stack: seq[Expr] = @[root]
     scopeStart = newSeq[int]()
@@ -127,7 +129,12 @@ proc buildDST*(tokens: seq[Token], displayPath: string): seq[Expr] {.gcsafe.} =
       continue
     # 2. Lookahead for 'key = value'
     if i + 2 < tokens.len and tokens[i+1].kind == eq:
-      let e = Expr(kind: expression, left: tokens[i].lex, right: tokens[i+2].lex, line: tokens[i].line,
+      let right = tokens[i+2]
+      var rightName = right.lex
+      if right.kind == rawStr and right.lex[1..^2].match(modifierPattern).isSome:
+        rightName = right.lex[1..^2]
+
+      let e = Expr(kind: expression, left: tokens[i].lex, right: rightName, line: tokens[i].line,
                    col: tokens[i].col)
       stack[^1].children.add(e)
       i += 3
